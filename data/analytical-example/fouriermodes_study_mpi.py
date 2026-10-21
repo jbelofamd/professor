@@ -9,7 +9,7 @@ from matplotlib import pyplot as plt
 from mpi4py import MPI
 
 
-def make_image(sample, nx, ny, mx1, mx2, my1, my2):
+def make_image(sample, nx, ny, mx1, mx2, my1, my2, png=True):
     output_name = "image" + str(sample).zfill(6)
 
     # Initialize grid
@@ -41,10 +41,12 @@ def make_image(sample, nx, ny, mx1, mx2, my1, my2):
             # compression="gzip",
         )
 
-    fig, ax = plt.subplots()
-    ax.imshow(grid, interpolation="none", vmax=vmax, vmin=vmin)
-    plt.savefig(output_name + ".png")
-    plt.close()
+    # the png is only for viewing; prof-trainer reads the h5 file
+    if png:
+        fig, ax = plt.subplots()
+        ax.imshow(grid, interpolation="none", vmax=vmax, vmin=vmin)
+        plt.savefig(output_name + ".png")
+        plt.close()
 
 
 parser = argparse.ArgumentParser()
@@ -71,6 +73,7 @@ parser.add_argument("--d_max", default=1, type=float)
 
 #
 parser.add_argument("-n", "--nsamp_per_dim", default=2, type=int)
+parser.add_argument("--no-png", action="store_true", help="Skip the png image of each sample (much faster)")
 
 args = parser.parse_args()
 
@@ -110,7 +113,7 @@ for a in a_space:
         for c in c_space:
             for d in d_space:
                 if count % size == rank:
-                    make_image(count, nx, ny, a, b, c, d)
+                    make_image(count, nx, ny, a, b, c, d, png=not args.no_png)
                 count += 1
                 if (np.mod(count, 1000) == 0) and rank == 0:
                     print(count)

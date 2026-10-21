@@ -63,6 +63,8 @@ nav:
         - 3D-models/data-generation.md
         - 3D-models/ml-training.md
         - 3D-models/ml-visualization.md
+  - Performance:
+    - MI355X partition modes: mi355x_partition_modes.md
     # - Basics: basics.md
     # - Installation: installation.md 
     # - Running: running.md
