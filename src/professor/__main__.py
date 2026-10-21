@@ -73,7 +73,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--loss_target",
         default="l1",
         type=str,
-        help="Either 'l1' for mean absolute error, or 'l2' for mean squared error. Default is l1",
+        help="Pointwise term of the loss: 'l1' for mean absolute error, or 'l2' for mean squared error."
+        " Default is l1",
+    )
+    parser.add_argument(
+        "--grad_weight",
+        default=0.0,
+        type=float,
+        help="Weight of the loss term on differences of the error between neighbouring pixels. Default 0: off.",
+    )
+    parser.add_argument(
+        "--pyr_weight",
+        default=0.0,
+        type=float,
+        help="Weight of the loss term on the Laplacian pyramid of the error. Default 0: off.",
+    )
+    parser.add_argument(
+        "--pyr_levels",
+        default=5,
+        type=int,
+        help="Number of band-pass levels of the Laplacian pyramid loss term.",
     )
     parser.add_argument(
         "--max_feature",

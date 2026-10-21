@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from torch.profiler import profile, record_function, ProfilerActivity
 import professor
-from professor.utils import consolidated_loss, last_checkpoint
+from professor.utils import consolidated_loss, field_loss, last_checkpoint
 from professor.layers import AlphaLinear
 from professor.torch_models import build_generator
 from professor.vela.config import build_template_config, update_config_checkpoint
@@ -570,12 +570,17 @@ def main(args: argparse.Namespace) -> None:
     # try to free up gpu memory
     torch.cuda.empty_cache()
 
-    MAE = torch.nn.L1Loss()
-    MSE = torch.nn.MSELoss()
-    if loss_target == "l1":
-        MyLoss = MAE
-    else:
-        MyLoss = MSE
+    grad_weight = getattr(args, "grad_weight", 0.0)
+    pyr_weight = getattr(args, "pyr_weight", 0.0)
+    pyr_levels = getattr(args, "pyr_levels", 5)
+
+    def MyLoss(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        return field_loss(output, target, loss_target, grad_weight, pyr_weight, pyr_levels)
+
+    if rank == 0:
+        print(
+            f"loss: {loss_target} + {grad_weight} * pixel differences + {pyr_weight} * pyramid ({pyr_levels} levels)"
+        )
 
     n_train_loader = len(train_loader)
     n_train_data = size * batch_size * n_train_loader * n_channels * n_pixels_y * n_pixels_x  # noqa E:501

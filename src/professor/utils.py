@@ -5,6 +5,7 @@
 import os
 import re
 import torch
+import torch.nn.functional as F
 from typing import Optional, Union, Dict, Any, Sequence, Tuple
 
 
@@ -105,3 +106,91 @@ def last_checkpoint(run_directory: str) -> Tuple[str, int]:
         return "", -1
     epoch, name = max(found)
     return os.path.join(run_directory, name), epoch
+
+
+def neighbour_l1(error: torch.Tensor) -> torch.Tensor:
+    """
+    Mean absolute difference of an error field between adjacent pixels, summed over the spatial axes.
+
+    Penalizes error that changes from one pixel to the next (speckle, misplaced edges) and leaves
+    smooth error alone.
+
+    Args:
+        error (torch.Tensor): Error pred - target, shape (n, channels, y, x) or (n, channels, y, x, z)
+
+    Returns:
+        torch.Tensor: mean |d_y error| + mean |d_x error| (+ mean |d_z error|)
+    """
+    loss = torch.zeros((), device=error.device, dtype=error.dtype)
+    for dim in range(2, error.dim()):
+        if error.shape[dim] > 1:
+            loss = loss + torch.mean(torch.abs(torch.diff(error, dim=dim)))
+    return loss
+
+
+def pyramid_l1(error: torch.Tensor, levels: int = 5) -> torch.Tensor:
+    """
+    L1 norm of an error field split into a Laplacian pyramid, finest band weighted most.
+
+    With G_0 = error and G_{l+1} the 2x2 (2x2x2 in 3D) average of G_l, the bands are
+    B_l = G_l - up(G_{l+1}), with up() nearest-neighbour upsampling, and the loss is
+    sum_l 2^-l mean |B_l| + 2^-L mean |G_L|. Each octave of the error then enters the loss on its
+    own, so the few fine-scale bands are not swamped by the coarse error. Fields with a side
+    shorter than 2^levels use fewer levels.
+
+    Args:
+        error (torch.Tensor): Error pred - target, shape (n, channels, y, x) or (n, channels, y, x, z)
+        levels (int): Number of band-pass levels L
+
+    Returns:
+        torch.Tensor: The pyramid loss
+    """
+    if error.dim() not in (4, 5):
+        raise ValueError(f"pyramid_l1 needs 2D or 3D fields, got shape {tuple(error.shape)}")
+    avg_pool = F.avg_pool2d if error.dim() == 4 else F.avg_pool3d
+    levels = min(levels, min(error.shape[2:]).bit_length() - 1)
+    loss = torch.zeros((), device=error.device, dtype=error.dtype)
+    g = error
+    for level in range(levels):
+        down = avg_pool(g, 2)
+        band = g - F.interpolate(down, size=g.shape[2:], mode="nearest")
+        loss = loss + 2.0**-level * torch.mean(torch.abs(band))
+        g = down
+    return loss + 2.0**-levels * torch.mean(torch.abs(g))
+
+
+def field_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    loss_target: str = "l1",
+    grad_weight: float = 0.0,
+    pyr_weight: float = 0.0,
+    pyr_levels: int = 5,
+) -> torch.Tensor:
+    """
+    Training loss for full fields: a pointwise term plus optional pixel-difference and pyramid terms.
+
+        loss = pointwise(e) + grad_weight * neighbour_l1(e) + pyr_weight * pyramid_l1(e, pyr_levels)
+
+    with e = pred - target and pointwise the mean absolute ('l1') or squared (anything else) error.
+    With the default weights of 0 this is the plain pointwise loss. With 'l1' every term is linear
+    in |e|, so the relative weights do not depend on the scale of the fields.
+
+    Args:
+        pred (torch.Tensor): Prediction, shape (n, channels, y, x) or (n, channels, y, x, z)
+        target (torch.Tensor): Target, same shape
+        loss_target (str): 'l1' for mean absolute error, anything else for mean squared error
+        grad_weight (float): Weight of the neighbouring-pixel difference term
+        pyr_weight (float): Weight of the Laplacian-pyramid term
+        pyr_levels (int): Band-pass levels of the pyramid
+
+    Returns:
+        torch.Tensor: The loss
+    """
+    error = pred - target
+    loss = torch.mean(torch.abs(error)) if loss_target == "l1" else torch.mean(torch.square(error))
+    if grad_weight:
+        loss = loss + grad_weight * neighbour_l1(error)
+    if pyr_weight:
+        loss = loss + pyr_weight * pyramid_l1(error, pyr_levels)
+    return loss

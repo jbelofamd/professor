@@ -165,7 +165,8 @@ This DDP training is a weak scaling process. If you have 10x more data, then you
 
 ```bash
 usage: prof-trainer [-h] [--batch_size BATCH_SIZE] [--lr LR] [--num_epochs NUM_EPOCHS] [--seed SEED] [--n_checkpoint N_CHECKPOINT]
-                    [--loss_target LOSS_TARGET] [--max_feature MAX_FEATURE] [--min_feature MIN_FEATURE] [--restart_model RESTART_MODEL] [--keys KEYS]
+                    [--loss_target LOSS_TARGET] [--grad_weight GRAD_WEIGHT] [--pyr_weight PYR_WEIGHT] [--pyr_levels PYR_LEVELS]
+                    [--max_feature MAX_FEATURE] [--min_feature MIN_FEATURE] [--restart_model RESTART_MODEL] [--keys KEYS]
                     [--dataset_path DATASET_PATH] [--dataset_type DATASET_TYPE] [--dataset_file DATASET_FILE] [--y_kernel Y_KERNEL]
                     [--x_kernel X_KERNEL] [--dataloader_workers DATALOADER_WORKERS] [--divide_input_scale DIVIDE_INPUT_SCALE] [--n_sims N_SIMS]
                     [--run_directory RUN_DIRECTORY]
@@ -178,7 +179,10 @@ Here is a description of each command line argument
 -   `num_epochs` The total number of training epochs. One epoch is one iteration through the entire dataset.
 -   `seed` The pseudorandom seed. This does not do much right now as two exact training script will return different ML Models because this does not control the random weight initialization in the ML model.
 -   `n_checkpoint` The frequency of epochs to checkpoint the model weights to disk.
--   `loss_target` The objective for the ML training optimizer. Either 'l1' for mean absolute error, or 'l2' for mean squared error are acceptable. Default is 'l1'.
+-   `loss_target` The pointwise term of the training loss. Either 'l1' for mean absolute error, or 'l2' for mean squared error are acceptable. Default is 'l1'.
+-   `grad_weight` (optional) Weight of a loss term on the differences of the error between neighbouring pixels, which penalizes speckle and misplaced edges but not smooth error. Default is 0, which switches it off.
+-   `pyr_weight` (optional) Weight of a loss term on the Laplacian pyramid of the error: each octave of the error enters the loss on its own, finest first, so the fine scales are not swamped by the coarse error. Default is 0, which switches it off. With `loss_target` 'l1' and both weights 1, this is the loss of the Rivus Rayleigh-Taylor study, where it halved the density error of a resize-convolution residual generator relative to mean squared error (1.58% -> 0.80%). With the `legacy` generator on unnormalized fields it trained much worse than plain 'l1', so check it for your model and data.
+-   `pyr_levels` (optional) Number of band-pass levels of the pyramid term. Default is 5.
 -   `max_feature` The maximum number of channels in the intermediate state of the ML model. If this value is 1024, then you could think of a 1024 colors of a single image. Typically use powers of 2. A larger value means you will have more ML parameters, and have a more complicated intermediate state.
 -   `min_feature` The minimum number of channels in the intermediate state of the ML model. Typically use powers of 2. A smaller value means you will have less ML parameters, and a smaller bottleneck in the ML model.
 -   `restart_model` (optional) The absolute file path to a previous model checkpoint '.pt' file.
