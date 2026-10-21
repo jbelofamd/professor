@@ -5,6 +5,7 @@
 import os
 import re
 import torch
+import torch.autograd.forward_ad as fwAD
 import torch.nn.functional as F
 from typing import Optional, Union, Dict, Any, Sequence, Tuple
 
@@ -194,3 +195,49 @@ def field_loss(
     if pyr_weight:
         loss = loss + pyr_weight * pyramid_l1(error, pyr_levels)
     return loss
+
+
+def forward_jvp(
+    model: torch.nn.Module, x: torch.Tensor, tangent: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Model output and its directional derivative along tangent, from one forward-mode pass.
+
+    Args:
+        model (torch.nn.Module): The model
+        x (torch.Tensor): Model input
+        tangent (torch.Tensor): Direction in input space, same shape as x
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: model(x) and d model(x + s * tangent) / ds at s = 0
+    """
+    with fwAD.dual_level():
+        out = model(fwAD.make_dual(x, tangent))
+        pred, d_pred = fwAD.unpack_dual(out)
+    if d_pred is None:  # output independent of the input
+        d_pred = torch.zeros_like(pred)
+    return pred, d_pred
+
+
+def sobolev_loss(d_pred: torch.Tensor, sens: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+    """
+    Mean squared error of the model's directional derivative against the reference sensitivities.
+
+    With tangent u along the first k inputs, the reference directional derivative is
+    sum_i u_i sens_i. Samples whose sensitivities are not all finite are left out. The error is
+    divided by k, so with u_i ~ N(0, 1 / rms_i^2) the loss estimates the mean over inputs of the
+    derivative mse / rms_i^2 at the cost of one jvp.
+
+    Args:
+        d_pred (torch.Tensor): Directional derivative of the model, shape (n, channels, y, x[, z])
+        sens (torch.Tensor): d fields / d inputs, shape (n, k, channels, y, x[, z])
+        u (torch.Tensor): Tangent along the first k inputs, shape (n, k)
+
+    Returns:
+        torch.Tensor: The loss
+    """
+    ok = torch.isfinite(sens).flatten(1).all(1)
+    sens = torch.where(ok.view(-1, *([1] * (sens.dim() - 1))), sens, torch.zeros_like(sens))
+    d = d_pred - torch.einsum("nk,nk...->n...", u.to(sens.dtype), sens)
+    e = torch.mean(torch.square(d.flatten(1)), 1)
+    return torch.sum(ok * e) / ok.sum().clamp(min=1) / sens.shape[1]
