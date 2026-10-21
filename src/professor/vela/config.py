@@ -655,6 +655,9 @@ def build_template_config(
     act_fun: str = "ReLU",
     upscale_type: str = "transpose",
     residual: bool = False,
+    use_batch_norm: bool = True,
+    res_blocks: list[int] = [1],
+    coord_channels: bool = True,
     fields: list[str] = ["field"],
     input_parameters: list[tuple[str, float, float]] = [("parameter_0", -1.0, 1.0)],
 ) -> None:
@@ -673,6 +676,7 @@ def build_template_config(
     available_generators = {
         "legacy": "professor.torch_models.Generator",
         "2D": "professor.torch_models.Generator2D",
+        "2D-resize-resnet": "professor.torch_models.GenResizeResNet",
         "3D-triplane": "professor.torch_models.Generator3DTriplane",
         "3D-spectral": "professor.torch_models.Generator3DSpectral",
         "3D-voxel": "professor.torch_models.Generator3DVoxel",
@@ -681,16 +685,23 @@ def build_template_config(
 
     params = conf["model"]["pytorch"]["invocation"]["params"]
     params["num_channels"] = n_channels
+    params["im_size"] = max(y_pixels, x_pixels, z_pixels)  # as in prof-trainer; the template uses x_pixels
     params["min_features"] = min_features
     params["max_features"] = max_features
     params["x_kernel"] = x_kernel
     params["y_kernel"] = y_kernel
     params["act_fun"] = act_fun
+    if not use_batch_norm:
+        params["use_batch_norm"] = False
 
     # Save generator specific options
     if generator_type in ["2D", "3D-triplane", "3D-spectral", "3D-voxel"]:
         params["upscale_type"] = upscale_type
         params["residual"] = residual
+
+    if generator_type == "2D-resize-resnet":
+        params["blocks"] = res_blocks[0] if len(res_blocks) == 1 else list(res_blocks)
+        params["coord_channels"] = coord_channels
 
     if generator_type in ["3D-triplane", "3D-spectral", "3D-voxel"]:
         dims["z_pixels"] = z_pixels

@@ -398,8 +398,13 @@ def main(args: argparse.Namespace) -> None:
 
     finalLayer = AlphaLinear(n_channels=n_channels, n_dims=n_dims)
 
+    # options added after the first integration tests; getattr keeps older argument namespaces working
+    use_batch_norm = not getattr(args, "no_batch_norm", False)
+    res_blocks = [int(b) for b in str(getattr(args, "res_blocks", "1")).split(",")]
+    coord_channels = not getattr(args, "no_coord_channels", False)
+
     # Select generator strategy
-    # Note: use_batch_norm and last_bias are not wired into the user argument parser
+    # Note: last_bias is not wired into the user argument parser
     model = build_generator(
         args.generator_type,
         input_size=n_input,
@@ -416,6 +421,9 @@ def main(args: argparse.Namespace) -> None:
         act_fun=args.act_fun,
         upscale_type=args.upscale_type,
         residual=args.residual,
+        use_batch_norm=use_batch_norm,
+        res_blocks=res_blocks[0] if len(res_blocks) == 1 else res_blocks,
+        coord_channels=coord_channels,
     )
 
     if rank == 0:
@@ -524,6 +532,9 @@ def main(args: argparse.Namespace) -> None:
             act_fun=args.act_fun,
             upscale_type=args.upscale_type,
             residual=args.residual,
+            use_batch_norm=use_batch_norm,
+            res_blocks=res_blocks,
+            coord_channels=coord_channels,
         )
 
     # try to free up gpu memory
