@@ -4,7 +4,6 @@
 
 import os
 import multiprocessing
-import glob
 import argparse
 import socket
 import contextlib
@@ -16,7 +15,7 @@ import torch
 import torch.nn as nn
 from torch.profiler import profile, record_function, ProfilerActivity
 import professor
-from professor.utils import consolidated_loss
+from professor.utils import consolidated_loss, last_checkpoint
 from professor.layers import AlphaLinear
 from professor.torch_models import build_generator
 from professor.vela.config import build_template_config, update_config_checkpoint
@@ -266,20 +265,10 @@ def main(args: argparse.Namespace) -> None:
     if args.run_directory:
         print(f"[rank{rank}]: Using run directory of {args.run_directory}")
         # look for latest checkpoint file in that directory
-        checkpoints = glob.glob(f"{args.run_directory}/*.pt")
-        checkpoints.sort()
-        if checkpoints:
-            checkpoint_file = (
-                checkpoints[-1]
-                .replace(
-                    f"{args.run_directory}",
-                    "",
-                )
-                .strip("/")
-            )
-            print(checkpoint_file)
-            restart_model = f"{args.run_directory}/{checkpoint_file}"
-            epoch_number = int(checkpoint_file.strip(".pt")) + 1
+        checkpoint_file, last_epoch = last_checkpoint(args.run_directory)
+        if checkpoint_file:
+            restart_model = checkpoint_file
+            epoch_number = last_epoch + 1
             print(f"[rank{rank}]: Found previous checkpoint {checkpoint_file}")
             print(f"[rank{rank}]: Starting from epoch number {epoch_number}")
         writer = SummaryWriter(log_dir=args.run_directory, comment="")
@@ -684,7 +673,7 @@ def main(args: argparse.Namespace) -> None:
                     #     optimizer_complex.consolidate_state_dict()
 
                     if rank == 0:
-                        filepath = f"{output_dir}/{epoch:04d}"
+                        filepath = f"{output_dir}/{epoch:04d}.pt"
                         state = {"optimizer": optimizer.state_dict()}
                         # if optimizer_complex is not None:
                         #     state["optimizer_complex"] = optimizer_complex.state_dict()
