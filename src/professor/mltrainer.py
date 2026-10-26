@@ -655,13 +655,15 @@ def main(args: argparse.Namespace) -> None:
     def MyLoss(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return field_loss(output, target, loss_target, grad_weight, pyr_weight, pyr_levels)
 
-    def ForwardLoss(batch: Any) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """model output, total loss and the Sobolev term (0 if off) for one training batch"""
-        data, target = batch[0], batch[1]
-        if not sobolev:
+    def ForwardLoss(
+        data: torch.Tensor, target: torch.Tensor, sens: torch.Tensor | None = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """model output, total loss and the Sobolev term (0 if off) for one training batch;
+        the datasets return the derivatives sens only when the Sobolev term is on"""
+        if sens is None:
             output = model(data)
             return output, MyLoss(output, target), torch.zeros((), device=device)
-        sens = batch[2].to(device)
+        sens = sens.to(device)
         u = torch.randn(data.shape[0], n_sens, device=device) * sens_scale
         tangent = torch.zeros_like(data)
         tangent[:, :n_sens, 0, 0] = u
@@ -710,7 +712,7 @@ def main(args: argparse.Namespace) -> None:
                 # if optimizer_complex is not None:
                 #     optimizer_complex.zero_grad(set_to_none=True)
 
-                for batch_idx, batch in enumerate(train_loader):
+                for batch_idx, (data, target, *sens) in enumerate(train_loader):
                     with record_function("optimizer_step"):
                         should_update_weights = (batch_idx + 1) % batch_multiplier == 0
                         if batch_idx + 1 == n_train_loader:
@@ -720,8 +722,8 @@ def main(args: argparse.Namespace) -> None:
                         group_end = min(group_start + batch_multiplier, n_train_loader)
                         accumulation_group_size = group_end - group_start
 
-                        data = batch[0].to(device)
-                        target = batch[1].to(device)
+                        data = data.to(device)
+                        target = target.to(device)
                         if _prof_chlast:
                             data = data.to(memory_format=memory_format)
                             target = target.to(memory_format=memory_format)
@@ -732,7 +734,7 @@ def main(args: argparse.Namespace) -> None:
 
                         with sync_context:
                             with torch.autocast("cuda", dtype=_amp_dtype, enabled=_amp_dtype is not None):
-                                output, loss, loss_d = ForwardLoss((data, target, *batch[2:]))
+                                output, loss, loss_d = ForwardLoss(data, target, *sens)
                             if sobolev:
                                 train_sob_gpu += loss_d
                             scaled_loss = loss / accumulation_group_size
