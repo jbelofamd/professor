@@ -10,8 +10,8 @@ import torch.nn as nn
 from omegaconf import OmegaConf
 
 from professor.__main__ import GENERATOR_ACTIVATION_FUNCTIONS
-from professor.layers import AlphaLinear
-from professor.torch_models import AddCoords, GenResizeResNet, ResBlock, build_generator
+from professor.layers import AddCoords, AlphaLinear, ResBlock
+from professor.torch_models import GenResizeResNet, build_generator
 from professor.vela.config import FullSchema, Keys, build_template_config
 from professor.vela.utils import get_object_reference, initialize_function_calls_in_parameters
 
@@ -43,7 +43,7 @@ class TestGenResizeResNet(unittest.TestCase):
 
     def test_res_block_starts_as_identity(self):
         for use_batch_norm in (False, True):
-            block = ResBlock(8, "SiLU", use_batch_norm).eval()
+            block = ResBlock(8, nn.SiLU(inplace=True), use_batch_norm).eval()
             x = torch.randn(2, 8, 5, 5)
             self.assertTrue(torch.equal(block(x), x))
 

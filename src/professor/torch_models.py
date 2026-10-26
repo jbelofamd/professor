@@ -9,7 +9,7 @@ import torch.nn as nn
 import numpy as np
 from torchlayers.upsample import ConvPixelShuffle  # type: ignore[import-untyped]
 from typing import cast, Dict, Iterable, Sequence, Union
-from professor.layers import UpscaleBlock2D, UpscaleBlock3D, UpscaleBlock3DSpectral
+from professor.layers import AddCoords, ResBlock, UpscaleBlock2D, UpscaleBlock3D, UpscaleBlock3DSpectral
 
 
 class RB(nn.Module):
@@ -1069,44 +1069,6 @@ class GenResizeConv(nn.Module):
         return self.main(input)
 
 
-class AddCoords(nn.Module):
-    """Append normalized (y, x) pixel coordinates in [-1, 1] as two extra channels."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        n, _, h, w = x.shape
-        y = torch.linspace(-1.0, 1.0, h, device=x.device, dtype=x.dtype)
-        xx = torch.linspace(-1.0, 1.0, w, device=x.device, dtype=x.dtype)
-        grid = torch.stack(torch.meshgrid(y, xx, indexing="ij"))
-        return torch.cat([x, grid.expand(n, -1, -1, -1)], 1)
-
-
-class ResBlock(nn.Module):
-    """Pre-activation residual block: x + conv(act(conv(act(x)))), 3x3 convolutions.
-
-    The second convolution (or its batch norm scale) starts at zero, so the block is the
-    identity at initialization and stacking blocks does not change the starting model.
-    """
-
-    def __init__(self, features: int, act_fun: str = "ReLU", use_batch_norm: bool = False) -> None:
-        super().__init__()
-        layers: list[nn.Module] = []
-        for _ in range(2):
-            act = build_activation(act_fun)
-            if hasattr(act, "inplace"):
-                act.inplace = False  # never overwrite the block input that the skip adds back
-            layers += [act, nn.Conv2d(features, features, kernel_size=3, padding="same", bias=not use_batch_norm)]
-            if use_batch_norm:
-                layers.append(nn.BatchNorm2d(features))
-        self.body: nn.Sequential = nn.Sequential(*layers)
-        last = self.body[-1]
-        nn.init.zeros_(last.weight)
-        if last.bias is not None:
-            nn.init.zeros_(last.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.body(x)
-
-
 class GenResizeResNet(nn.Module):
     """Resize-convolution generator with residual blocks and coordinate channels.
 
@@ -1175,7 +1137,7 @@ class GenResizeResNet(nn.Module):
                 )
             )
             layers += norm_act(features[k + 1])
-            layers += [ResBlock(features[k + 1], act_fun, use_batch_norm) for _ in range(n_blocks[k])]
+            layers += [ResBlock(features[k + 1], build_activation(act_fun), use_batch_norm) for _ in range(n_blocks[k])]
         layers += [nn.Conv2d(features[-1], num_channels, kernel_size=3, padding="same", bias=last_bias), last_layer]
         self.main: nn.Sequential = nn.Sequential(*layers)
 
