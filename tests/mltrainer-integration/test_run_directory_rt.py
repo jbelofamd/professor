@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 import os
+import io
 import shutil
+import contextlib
 import unittest
 
 from torchinfo import summary  # noqa: F401
@@ -79,7 +81,14 @@ class TestEverything(unittest.TestCase):
         # Starting restart from run_directory
         # also test if the path has extra / at end of it
         args = build_test_args(2, mypath + "/")
-        mltrainer.main(args)
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            mltrainer.main(args)
+        print(log.getvalue())
+        # the second run continues from the first run's checkpoint instead of starting over
+        self.assertIn("Starting from epoch number 1", log.getvalue())
+        self.assertTrue(os.path.exists(f"{mypath}/0000.pt"))
+        self.assertTrue(os.path.exists(f"{mypath}/0001.pt"))
 
 
 if __name__ == "__main__":

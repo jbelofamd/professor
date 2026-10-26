@@ -2,8 +2,10 @@
 # contributors
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+import os
+import re
 import torch
-from typing import Optional, Union, Dict, Any, Sequence
+from typing import Optional, Union, Dict, Any, Sequence, Tuple
 
 
 def consolidated_loss(
@@ -75,3 +77,31 @@ def consolidated_loss(
 
     # Otherwise return dictionary of individual losses
     return losses
+
+
+def last_checkpoint(run_directory: str) -> Tuple[str, int]:
+    """
+    Finds the latest checkpoint that prof-trainer wrote to a run directory.
+
+    Checkpoints are named by their zero-padded epoch number with a ``.pt`` suffix (``0042.pt``),
+    or bare (``0042``) for runs written by versions between the 3D generators and this fix,
+    so a run started with either version can be continued.
+
+    Args:
+        run_directory (str): Run directory, with or without a trailing slash
+
+    Returns:
+        Tuple[str, int]: Path of the latest checkpoint and its epoch number, or ("", -1)
+        if the directory does not exist or holds no checkpoint
+    """
+    if not os.path.isdir(run_directory):
+        return "", -1
+    found = []
+    for name in os.listdir(run_directory):
+        match = re.fullmatch(r"(\d+)(\.pt)?", name)
+        if match and os.path.isfile(os.path.join(run_directory, name)):
+            found.append((int(match.group(1)), name))
+    if not found:
+        return "", -1
+    epoch, name = max(found)
+    return os.path.join(run_directory, name), epoch
