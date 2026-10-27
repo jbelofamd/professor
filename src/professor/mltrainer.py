@@ -424,6 +424,8 @@ def main(args: argparse.Namespace) -> None:
         use_batch_norm=use_batch_norm,
         res_blocks=res_blocks[0] if len(res_blocks) == 1 else res_blocks,
         coord_channels=coord_channels,
+        y_pixels=n_pixels_y,
+        x_pixels=n_pixels_x,
     )
 
     if rank == 0:

@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from torchlayers.upsample import ConvPixelShuffle  # type: ignore[import-untyped]
-from typing import cast, Dict, Iterable, Sequence, Union
+from typing import cast, Dict, Iterable, Optional, Sequence, Union
 from professor.layers import AddCoords, ResBlock, UpscaleBlock2D, UpscaleBlock3D, UpscaleBlock3DSpectral
 
 
@@ -1085,6 +1085,10 @@ class GenResizeResNet(nn.Module):
       position is only known through the seed, and the stages, being translation invariant,
       can leave seams on the edges of the upsampled seed cells.
     * convolutions have a bias when batch norm is off.
+
+    The output is (y_kernel, x_kernel) times a power of 2. When `y_pixels` and `x_pixels` are given
+    (prof-trainer passes the fields' size), the output must match both, so kernels with the wrong
+    aspect ratio fail here rather than as a shape mismatch in the loss.
     """
 
     def __init__(
@@ -1103,6 +1107,8 @@ class GenResizeResNet(nn.Module):
         blocks: Union[int, Sequence[int]] = 1,
         coord_channels: bool = True,
         last_bias: bool = False,
+        y_pixels: Optional[int] = None,
+        x_pixels: Optional[int] = None,
         **_,
     ) -> None:
         super().__init__()
@@ -1111,6 +1117,13 @@ class GenResizeResNet(nn.Module):
         if n_stages < 1 or max_kernel * 2**n_stages != im_size:
             raise ValueError(
                 f"im_size ({im_size}) must be max(y_kernel, x_kernel) ({max_kernel}) times a power of 2"
+            )
+        output_shape = (y_kernel * 2**n_stages, x_kernel * 2**n_stages)
+        field_shape = (y_pixels or output_shape[0], x_pixels or output_shape[1])
+        if output_shape != field_shape:
+            raise ValueError(
+                f"y_kernel, x_kernel ({y_kernel}, {x_kernel}) give a {output_shape[0]} x {output_shape[1]} output,"
+                f" but the fields are {field_shape[0]} x {field_shape[1]}: the kernels need the fields' aspect ratio"
             )
         n_blocks = [blocks] * n_stages if isinstance(blocks, int) else list(blocks)
         if len(n_blocks) != n_stages:
@@ -1304,6 +1317,8 @@ def build_generator(
     last_bias: bool = False,
     res_blocks: Union[int, Sequence[int]] = 1,
     coord_channels: bool = True,
+    y_pixels: Optional[int] = None,
+    x_pixels: Optional[int] = None,
 ) -> nn.Module:
 
     if generator_type == "legacy":
@@ -1356,6 +1371,8 @@ def build_generator(
             blocks=res_blocks,
             coord_channels=coord_channels,
             last_bias=last_bias,
+            y_pixels=y_pixels,
+            x_pixels=x_pixels,
         )
 
     elif generator_type == "3D-triplane":

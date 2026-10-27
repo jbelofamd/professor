@@ -41,6 +41,19 @@ class TestGenResizeResNet(unittest.TestCase):
         with self.assertRaises(ValueError):
             GenResizeResNet(4, 96, 1, y_kernel=4, x_kernel=4)
 
+    def test_kernels_must_match_field_aspect_ratio(self):
+        # 3 x 2 kernels reach im_size 768 on the long side, but give 768 x 512, not the fields' 768 x 256
+        with self.assertRaisesRegex(ValueError, "768 x 512 output, but the fields are 768 x 256"):
+            GenResizeResNet(4, 768, 1, y_kernel=3, x_kernel=2, y_pixels=768, x_pixels=256)
+        model = GenResizeResNet(
+            4, 768, 1, min_features=4, max_features=8, y_kernel=3, x_kernel=1, y_pixels=768, x_pixels=256
+        )
+        self.assertEqual(tuple(model(torch.rand(2, 4, 1, 1)).shape), (2, 1, 768, 256))
+        with self.assertRaises(ValueError):
+            build_generator(
+                "2D-resize-resnet", input_size=4, im_size=768, y_kernel=1, x_kernel=3, y_pixels=768, x_pixels=256
+            )
+
     def test_res_block_starts_as_identity(self):
         for use_batch_norm in (False, True):
             block = ResBlock(8, nn.SiLU(inplace=True), use_batch_norm).eval()
