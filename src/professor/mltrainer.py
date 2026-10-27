@@ -12,12 +12,6 @@ import numpy as np
 from numpy.typing import NDArray
 import h5py
 import torch
-# On some ROCm + MPI stacks (e.g. MI355X with MPICH), the HIP runtime cannot initialize
-# *after* MPI_Init (which mpi4py triggers on import) -- torch.cuda then reports no
-# GPUs. Force the GPU context to initialize before importing mpi4py.
-if torch.cuda.is_available():
-    torch.cuda.init()
-from mpi4py import MPI  # noqa: E402
 import torch.nn as nn
 from torch.profiler import profile, record_function, ProfilerActivity
 import professor
@@ -191,6 +185,15 @@ class CompleteDatasetRandom(Dataset[Any]):
 
 
 def main(args: argparse.Namespace) -> None:
+    # On some ROCm + MPI stacks (e.g. MI355X with MPICH), the HIP runtime cannot initialize
+    # *after* MPI_Init (which mpi4py triggers on import) -- torch.cuda then reports no
+    # GPUs. Initialize the GPU runtime before importing mpi4py. Both happen here rather than
+    # at module import, because spawned/forkserver DataLoader workers re-import this module
+    # and only read data: they should create neither a GPU context nor an MPI process.
+    if torch.cuda.is_available():
+        torch.cuda.init()
+    from mpi4py import MPI
+
     # Initialize MPI
     COMM = MPI.COMM_WORLD
     rank = COMM.rank
@@ -249,10 +252,13 @@ def main(args: argparse.Namespace) -> None:
     # --- experimental performance toggles (env-gated, default off) ---
     _prof_bench = os.environ.get("PROF_CUDNN_BENCHMARK", "0") == "1"
     _prof_chlast = os.environ.get("PROF_CHANNELS_LAST", "0") == "1"
-    _prof_amp = os.environ.get("PROF_AMP", "").lower()  # "", "bf16", or "fp16"
+    # bf16 only: fp16 would need a gradient scaler, bf16 has the exponent range of fp32
+    _prof_amp = os.environ.get("PROF_AMP", "").lower()  # "" or "bf16"
     if _prof_bench:
         torch.backends.cudnn.benchmark = True
-    _amp_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(_prof_amp)
+    if _prof_amp not in ("", "bf16"):
+        raise ValueError(f"PROF_AMP={_prof_amp!r} is not supported; use bf16 or leave it unset")
+    _amp_dtype = torch.bfloat16 if _prof_amp == "bf16" else None
     if rank == 0:
         print(f"[perf] cudnn.benchmark={_prof_bench} channels_last={_prof_chlast} amp={_prof_amp or 'off'}")
 
@@ -479,10 +485,6 @@ def main(args: argparse.Namespace) -> None:
     multiprocessing_context = "spawn"
     if "forkserver" in multiprocessing.get_all_start_methods():
         multiprocessing_context = "forkserver"
-    # Spawned/forkserver workers re-import this module, and with it mpi4py. Keep them from calling
-    # MPI_Init: under MPICH's mpiexec (hydra) a worker's MPI_Init fails with "PMI_Init failed" and
-    # aborts the job. The workers only read data and never use MPI. (Needs mpi4py >= 4.0.)
-    os.environ["MPI4PY_RC_INITIALIZE"] = "0"
 
     train_sampler = DistributedSampler(TrainDataset, shuffle=True)
     train_loader = DataLoader(
