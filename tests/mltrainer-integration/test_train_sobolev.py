@@ -95,7 +95,7 @@ class TestEverything(unittest.TestCase):
             sobolev = [float(v) for v in re.findall(r"^\d{4} sobolev (\S+)$", log.getvalue(), re.MULTILINE)]
             self.assertEqual(len(sobolev), 3)
             self.assertTrue(all(math.isfinite(v) and v > 0 for v in sobolev))
-            self.assertTrue(os.path.exists(f"{run_directory}/0002"))
+            self.assertTrue(os.path.exists(f"{run_directory}/0002.pt"))
 
 
 if __name__ == "__main__":

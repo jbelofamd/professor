@@ -58,8 +58,8 @@ class TestEverything(unittest.TestCase):
             print(log.getvalue())
 
             self.assertIn("loss: l1 + 1.0 * pixel differences + 1.0 * pyramid (5 levels)", log.getvalue())
-            checkpoint = f"{run_directory}/0001"
-            self.assertTrue(os.path.exists(f"{run_directory}/0000") and os.path.exists(checkpoint))
+            checkpoint = f"{run_directory}/0001.pt"
+            self.assertTrue(os.path.exists(f"{run_directory}/0000.pt") and os.path.exists(checkpoint))
             state = torch.load(checkpoint, map_location="cpu")["model"]
             self.assertTrue(all(torch.isfinite(v).all() for v in state.values() if v.is_floating_point()))
 
