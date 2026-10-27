@@ -56,8 +56,8 @@ class TestEverything(unittest.TestCase):
             )
             mltrainer.main(args)
 
-            checkpoint = f"{run_directory}/0001"
-            self.assertTrue(os.path.exists(f"{run_directory}/0000") and os.path.exists(checkpoint))
+            checkpoint = f"{run_directory}/0001.pt"
+            self.assertTrue(os.path.exists(f"{run_directory}/0000.pt") and os.path.exists(checkpoint))
             conf = FullSchema(OmegaConf.to_container(OmegaConf.load(vis_config), resolve=True)).val
             pytorch = conf[Keys.MODEL.value][Keys.PYTORCH.value]
             self.assertEqual(pytorch["checkpoints"][0], checkpoint)
