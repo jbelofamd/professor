@@ -1,6 +1,6 @@
 variables:
   PYTHON_ENVIRONMENT_PATH: /usr/workspace/${GITLAB_USER_LOGIN}/.mlvenv_professor_dev
-  LLNL_FLUX_SCHEDULER_PARAMETERS: -N 1 -t 10 --queue pci
+  LLNL_FLUX_SCHEDULER_PARAMETERS: -N 1 -t 30 --queue pci
 
 stages:
   - environment
@@ -19,6 +19,9 @@ configure_python:
     - if: $CI_MERGE_REQUEST_TITLE =~ /^Draft/
       when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Hubcast mirrors GitHub PRs as branch pushes; `@lc-hubcast restart pipeline`
+    # runs via the API, and "web" covers the GitLab "Run pipeline" button
+    - if: $CI_PIPELINE_SOURCE =~ /^(push|api|web)$/
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 build:
@@ -37,6 +40,9 @@ build:
     - if: $CI_MERGE_REQUEST_TITLE =~ /^Draft/
       when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Hubcast mirrors GitHub PRs as branch pushes; `@lc-hubcast restart pipeline`
+    # runs via the API, and "web" covers the GitLab "Run pipeline" button
+    - if: $CI_PIPELINE_SOURCE =~ /^(push|api|web)$/
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 test:
@@ -53,6 +59,9 @@ test:
     - if: $CI_MERGE_REQUEST_TITLE =~ /^Draft/
       when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Hubcast mirrors GitHub PRs as branch pushes; `@lc-hubcast restart pipeline`
+    # runs via the API, and "web" covers the GitLab "Run pipeline" button
+    - if: $CI_PIPELINE_SOURCE =~ /^(push|api|web)$/
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 include:
