@@ -667,7 +667,9 @@ def main(args: argparse.Namespace) -> None:
         u = torch.randn(data.shape[0], n_sens, device=device) * sens_scale
         tangent = torch.zeros_like(data)
         tangent[:, :n_sens, 0, 0] = u
-        output, d_output = forward_jvp(model, data, tangent)
+        # forward-mode AD skips autocast (fp32 dual input against bf16 weights), so this step runs in fp32
+        with torch.autocast("cuda", enabled=False):
+            output, d_output = forward_jvp(model, data, tangent)
         loss_d = sobolev_loss(d_output, sens, u)
         return output, MyLoss(output, target) + sobolev_weight * loss_d, loss_d.detach()
 
