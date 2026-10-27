@@ -8,8 +8,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 from torchlayers.upsample import ConvPixelShuffle  # type: ignore[import-untyped]
-from typing import cast, Dict, Iterable
-from professor.layers import UpscaleBlock2D, UpscaleBlock3D, UpscaleBlock3DSpectral
+from typing import cast, Dict, Iterable, Optional, Sequence, Union
+from professor.layers import AddCoords, ResBlock, UpscaleBlock2D, UpscaleBlock3D, UpscaleBlock3DSpectral
 
 
 class RB(nn.Module):
@@ -1069,6 +1069,95 @@ class GenResizeConv(nn.Module):
         return self.main(input)
 
 
+class GenResizeResNet(nn.Module):
+    """Resize-convolution generator with residual blocks and coordinate channels.
+
+    A (n, input_size, 1, 1) input becomes a (y_kernel, x_kernel) seed through a transposed
+    convolution, and each stage doubles it (nearest-neighbour upsampling, then a 3x3
+    convolution) until the long side is im_size. Unlike a stride-2 transposed convolution,
+    every output pixel sees the same kernel, so there is no checkerboard. Stage widths are
+    min(min_features * 2**k, max_features), k counted from the finest stage. In addition:
+
+    * `blocks` residual blocks follow each stage's convolution, including the full-resolution
+      stage. A sequence gives the count per stage, coarse to fine, so depth can go to the fine
+      stages that resolve thin structure.
+    * `coord_channels` appends normalized (y, x) coordinates to every stage input. Otherwise
+      position is only known through the seed, and the stages, being translation invariant,
+      can leave seams on the edges of the upsampled seed cells.
+    * convolutions have a bias when batch norm is off.
+
+    The output is (y_kernel, x_kernel) times a power of 2. When `y_pixels` and `x_pixels` are given
+    (prof-trainer passes the fields' size), the output must match both, so kernels with the wrong
+    aspect ratio fail here rather than as a shape mismatch in the loss.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        im_size: int,
+        num_channels: int,
+        min_features: int = 64,
+        max_features: int = 512,
+        first_layer: nn.Module = nn.Identity(),
+        last_layer: nn.Module = nn.Tanh(),
+        use_batch_norm: bool = True,
+        y_kernel: int = 4,
+        x_kernel: int = 4,
+        act_fun: str = "ReLU",
+        blocks: Union[int, Sequence[int]] = 1,
+        coord_channels: bool = True,
+        last_bias: bool = False,
+        y_pixels: Optional[int] = None,
+        x_pixels: Optional[int] = None,
+        **_,
+    ) -> None:
+        super().__init__()
+        max_kernel = max(y_kernel, x_kernel)
+        n_stages = int(round(np.log2(im_size / max_kernel)))
+        if n_stages < 1 or max_kernel * 2**n_stages != im_size:
+            raise ValueError(
+                f"im_size ({im_size}) must be max(y_kernel, x_kernel) ({max_kernel}) times a power of 2"
+            )
+        output_shape = (y_kernel * 2**n_stages, x_kernel * 2**n_stages)
+        field_shape = (y_pixels or output_shape[0], x_pixels or output_shape[1])
+        if output_shape != field_shape:
+            raise ValueError(
+                f"y_kernel, x_kernel ({y_kernel}, {x_kernel}) give a {output_shape[0]} x {output_shape[1]} output,"
+                f" but the fields are {field_shape[0]} x {field_shape[1]}: the kernels need the fields' aspect ratio"
+            )
+        n_blocks = [blocks] * n_stages if isinstance(blocks, int) else list(blocks)
+        if len(n_blocks) != n_stages:
+            raise ValueError(f"blocks needs one entry per stage ({n_stages}), got {len(n_blocks)}")
+        # features after the seed (k = 0) and after each stage, coarse to fine
+        features = [int(min(min_features * 2 ** (n_stages - 1 - k), max_features)) for k in range(n_stages)]
+        features.append(min_features)
+        n_coords = 2 if coord_channels else 0
+
+        def norm_act(f: int) -> list[nn.Module]:
+            return ([nn.BatchNorm2d(f)] if use_batch_norm else []) + [build_activation(act_fun)]
+
+        layers: list[nn.Module] = [
+            first_layer,
+            nn.ConvTranspose2d(input_size, features[0], kernel_size=(y_kernel, x_kernel), bias=False),
+        ] + norm_act(features[0])
+        for k in range(n_stages):
+            layers.append(nn.Upsample((y_kernel * 2 ** (k + 1), x_kernel * 2 ** (k + 1)), mode="nearest"))
+            if coord_channels:
+                layers.append(AddCoords())
+            layers.append(
+                nn.Conv2d(
+                    features[k] + n_coords, features[k + 1], kernel_size=3, padding="same", bias=not use_batch_norm
+                )
+            )
+            layers += norm_act(features[k + 1])
+            layers += [ResBlock(features[k + 1], build_activation(act_fun), use_batch_norm) for _ in range(n_blocks[k])]
+        layers += [nn.Conv2d(features[-1], num_channels, kernel_size=3, padding="same", bias=last_bias), last_layer]
+        self.main: nn.Sequential = nn.Sequential(*layers)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return self.main(input)
+
+
 class FlatView(nn.Module):
     def __init__(self, output_shape: int) -> None:
         super(FlatView, self).__init__()
@@ -1226,6 +1315,10 @@ def build_generator(
     upscale_type: str = "transpose",
     residual: bool = False,
     last_bias: bool = False,
+    res_blocks: Union[int, Sequence[int]] = 1,
+    coord_channels: bool = True,
+    y_pixels: Optional[int] = None,
+    x_pixels: Optional[int] = None,
 ) -> nn.Module:
 
     if generator_type == "legacy":
@@ -1260,6 +1353,26 @@ def build_generator(
             upscale_type=upscale_type,
             residual=residual,
             last_bias=last_bias,
+        )
+
+    elif generator_type == "2D-resize-resnet":
+        return GenResizeResNet(
+            input_size,
+            im_size,
+            num_channels,
+            min_features=min_features,
+            max_features=max_features,
+            first_layer=first_layer,
+            last_layer=last_layer,
+            use_batch_norm=use_batch_norm,
+            y_kernel=y_kernel,
+            x_kernel=x_kernel,
+            act_fun=act_fun,
+            blocks=res_blocks,
+            coord_channels=coord_channels,
+            last_bias=last_bias,
+            y_pixels=y_pixels,
+            x_pixels=x_pixels,
         )
 
     elif generator_type == "3D-triplane":

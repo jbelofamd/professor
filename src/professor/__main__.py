@@ -22,6 +22,7 @@ GENERATOR_ACTIVATION_FUNCTIONS = (
 GENERATOR_TYPES = (
     "legacy",
     "2D",
+    "2D-resize-resnet",
     "3D-triplane",
     "3D-voxel",
     # "3D-spectral"
@@ -142,6 +143,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Data upscaling method (transpose, nearest, linear)",
     )
     parser.add_argument("--residual", action="store_true", help="Use residual layers in the model.")
+    parser.add_argument(
+        "--res-blocks",
+        type=str,
+        default="1",
+        help="2D-resize-resnet generator: residual blocks per stage, one count for all stages or a comma"
+        " separated count per stage, coarse to fine.",
+    )
+    parser.add_argument(
+        "--no-coord-channels",
+        action="store_true",
+        help="2D-resize-resnet generator: do not append (y, x) coordinate channels to the stage inputs.",
+    )
+    parser.add_argument(
+        "--no-batch-norm",
+        action="store_true",
+        help="Build the generator without batch normalization.",
+    )
     parser.add_argument(
         "--intermediate-channels",
         type=int,

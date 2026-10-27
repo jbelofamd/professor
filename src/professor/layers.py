@@ -2,6 +2,8 @@
 # contributors
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+import copy
+
 import torch
 from torch import nn
 from typing import Optional, Any, cast
@@ -259,6 +261,45 @@ class UpscaleBlock2D(nn.Module):
             x = self.main(input)
             y = self.norm(x)
             return self.activation(y)
+
+
+class AddCoords(nn.Module):
+    """Append normalized (y, x) pixel coordinates in [-1, 1] as two extra channels."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        n, _, h, w = x.shape
+        y = torch.linspace(-1.0, 1.0, h, device=x.device, dtype=x.dtype)
+        xx = torch.linspace(-1.0, 1.0, w, device=x.device, dtype=x.dtype)
+        grid = torch.stack(torch.meshgrid(y, xx, indexing="ij"))
+        return torch.cat([x, grid.expand(n, -1, -1, -1)], 1)
+
+
+class ResBlock(nn.Module):
+    """Pre-activation residual block: x + conv(act(conv(act(x)))), 3x3 convolutions.
+
+    Each activation is a copy of activation_function (ReLU if None). The second convolution
+    (or its batch norm scale) starts at zero, so the block is the identity at initialization
+    and stacking blocks does not change the starting model.
+    """
+
+    def __init__(self, features: int, activation_function: nn.Module | None = None, batch_norm: bool = False):
+        super().__init__()
+        layers: list[nn.Module] = []
+        for _ in range(2):
+            act = copy.deepcopy(activation_function) if activation_function is not None else nn.ReLU()
+            if hasattr(act, "inplace"):
+                act.inplace = False  # never overwrite the block input that the skip adds back
+            layers += [act, nn.Conv2d(features, features, kernel_size=3, padding="same", bias=not batch_norm)]
+            if batch_norm:
+                layers.append(nn.BatchNorm2d(features))
+        self.body: nn.Sequential = nn.Sequential(*layers)
+        last = self.body[-1]
+        nn.init.zeros_(last.weight)
+        if last.bias is not None:
+            nn.init.zeros_(last.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.body(x)
 
 
 class UpscaleBlock3D(nn.Module):
