@@ -1,6 +1,6 @@
 variables:
   PYTHON_ENVIRONMENT_PATH: /usr/workspace/${GITLAB_USER_LOGIN}/.mlvenv_professor_dev
-  LLNL_FLUX_SCHEDULER_PARAMETERS: -N 1 -t 10 --queue pci
+  LLNL_FLUX_SCHEDULER_PARAMETERS: -N 1 -t 30 --queue pci
 
 stages:
   - environment
