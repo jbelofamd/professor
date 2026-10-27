@@ -10,7 +10,6 @@ import contextlib
 import numpy as np
 from numpy.typing import NDArray
 import h5py
-from mpi4py import MPI  # MUST BE IMPORTED BEFORE torch!
 import torch
 import torch.nn as nn
 from torch.profiler import profile, record_function, ProfilerActivity
@@ -185,6 +184,15 @@ class CompleteDatasetRandom(Dataset[Any]):
 
 
 def main(args: argparse.Namespace) -> None:
+    # On some ROCm + MPI stacks (e.g. MI355X with MPICH), the HIP runtime cannot initialize
+    # *after* MPI_Init (which mpi4py triggers on import) -- torch.cuda then reports no
+    # GPUs. Initialize the GPU runtime before importing mpi4py. Both happen here rather than
+    # at module import, because spawned/forkserver DataLoader workers re-import this module
+    # and only read data: they should create neither a GPU context nor an MPI process.
+    if torch.cuda.is_available():
+        torch.cuda.init()
+    from mpi4py import MPI
+
     # Initialize MPI
     COMM = MPI.COMM_WORLD
     rank = COMM.rank
@@ -202,7 +210,7 @@ def main(args: argparse.Namespace) -> None:
     print(f"[rank{rank}]: done hostname")
 
     os.environ["MASTER_ADDR"] = hostname
-    os.environ["MASTER_PORT"] = "23456"
+    os.environ.setdefault("MASTER_PORT", "23456")
 
     # wait a bit to make sure all nodes are running....
     sleep(3)
@@ -239,6 +247,19 @@ def main(args: argparse.Namespace) -> None:
         print(f"[rank{rank}]: Torch cuda device {torch.cuda.current_device()}")
     else:
         raise RuntimeError("No GPUs found!")
+
+    # --- experimental performance toggles (env-gated, default off) ---
+    _prof_bench = os.environ.get("PROF_CUDNN_BENCHMARK", "0") == "1"
+    _prof_chlast = os.environ.get("PROF_CHANNELS_LAST", "0") == "1"
+    # bf16 only: fp16 would need a gradient scaler, bf16 has the exponent range of fp32
+    _prof_amp = os.environ.get("PROF_AMP", "").lower()  # "" or "bf16"
+    if _prof_bench:
+        torch.backends.cudnn.benchmark = True
+    if _prof_amp not in ("", "bf16"):
+        raise ValueError(f"PROF_AMP={_prof_amp!r} is not supported; use bf16 or leave it unset")
+    _amp_dtype = torch.bfloat16 if _prof_amp == "bf16" else None
+    if rank == 0:
+        print(f"[perf] cudnn.benchmark={_prof_bench} channels_last={_prof_chlast} amp={_prof_amp or 'off'}")
 
     batch_size = args.batch_size
     batch_multiplier = getattr(args, "batch_multiplier", 1)
@@ -425,6 +446,9 @@ def main(args: argparse.Namespace) -> None:
 
     # broadcast parameters & optimizer state from root rank
     model.to(device)  # move to GPU
+    memory_format = torch.channels_last if n_dims == 2 else torch.channels_last_3d
+    if _prof_chlast:
+        model = model.to(memory_format=memory_format)
 
     if restart:
         # remap storage from GPU 0 to local GPU
@@ -459,6 +483,7 @@ def main(args: argparse.Namespace) -> None:
         num_workers=args.dataloader_workers,
         multiprocessing_context=multiprocessing_context,
         prefetch_factor=1,
+        drop_last=os.environ.get("PROF_DROP_LAST", "0") == "1",
     )
 
     val_loader = torch.utils.data.DataLoader(
@@ -468,11 +493,14 @@ def main(args: argparse.Namespace) -> None:
     )
 
     # Build optimizers
-    optimizer = ZeroRedundancyOptimizer(
-        model.parameters(),
-        optimizer_class=torch.optim.Adam,
-        lr=lr,
-    )
+    if os.environ.get("PROF_PLAIN_ADAM", "0") == "1":
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    else:
+        optimizer = ZeroRedundancyOptimizer(
+            model.parameters(),
+            optimizer_class=torch.optim.Adam,
+            lr=lr,
+        )
 
     # Note: complex parameters must be handled in a separate step with the ZeroRedundancyOptimizer
     #       this option needs additional testing, so defer it to a future PR
@@ -553,15 +581,19 @@ def main(args: argparse.Namespace) -> None:
             with record_function("epoch_setup"):
                 train_sampler.set_epoch(epoch)
                 t0 = time()
-                train_loss = 0.0
                 test_loss = 0.0
-                train_mse = 0.0
                 test_mse = 0.0
-                train_l8 = 0.0
                 test_l8 = 0.0
                 train_con = 0.0
                 test_con = 0.0
-                training_losses = torch.zeros(n_models)
+                # Training metrics are accumulated on-GPU during the epoch and
+                # copied to the host exactly once (after the step loop). This
+                # avoids a device->host sync on every step, which otherwise
+                # stalls the pipeline. Values are identical to the per-step sum.
+                train_loss_gpu = torch.zeros((), device=device)
+                train_mse_gpu = torch.zeros((), device=device)
+                train_l8_gpu = torch.zeros((), device=device)
+                training_losses_gpu = torch.zeros(n_models, device=device)
             with record_function("epoch_iteration"):
                 optimizer.zero_grad(set_to_none=True)
                 # if optimizer_complex is not None:
@@ -579,14 +611,18 @@ def main(args: argparse.Namespace) -> None:
 
                         data = data.to(device)
                         target = target.to(device)
+                        if _prof_chlast:
+                            data = data.to(memory_format=memory_format)
+                            target = target.to(memory_format=memory_format)
 
                         sync_context = contextlib.nullcontext()
                         if not should_update_weights:
                             sync_context = model.no_sync()
 
                         with sync_context:
-                            output = model(data)
-                            loss = MyLoss(output, target)
+                            with torch.autocast("cuda", dtype=_amp_dtype, enabled=_amp_dtype is not None):
+                                output = model(data)
+                                loss = MyLoss(output, target)
                             scaled_loss = loss / accumulation_group_size
                             scaled_loss.backward()
 
@@ -602,20 +638,24 @@ def main(args: argparse.Namespace) -> None:
                     with record_function("other_losses"):
                         with torch.no_grad():
                             losses = consolidated_loss(
-                                output, target, loss_types=["l1-sum", "l2-sum", "linf", "sum-per-channel"]
+                                output.float(), target, loss_types=["l1-sum", "l2-sum", "linf", "sum-per-channel"]
                             )
                             assert isinstance(losses, dict)
-                            training_losses += losses["sum-per-channel"].cpu()
-                            train_loss += losses["l1-sum"].item()
-                            train_mse += losses["l2-sum"].item()
-                            train_l8 = max(
-                                losses["linf"].item(),
-                                train_l8,
-                            )
+                            # accumulate on-device; no host sync inside the loop
+                            training_losses_gpu += losses["sum-per-channel"]
+                            train_loss_gpu += losses["l1-sum"]
+                            train_mse_gpu += losses["l2-sum"]
+                            train_l8_gpu = torch.maximum(train_l8_gpu, losses["linf"])
                     if args.profile and (prof is not None):
                         prof.step()
                     # end of a step in the epoch
                 t1 = time()
+
+                # single device->host sync per epoch for the accumulated metrics
+                train_loss = train_loss_gpu.item()
+                train_mse = train_mse_gpu.item()
+                train_l8 = train_l8_gpu.item()
+                training_losses = training_losses_gpu.cpu()
 
                 with record_function("communicate_losses_to_rank0"):
                     training_sums = np.array(
@@ -668,7 +708,8 @@ def main(args: argparse.Namespace) -> None:
                                 writer.add_scalar(key, history[key], epoch)
 
                 if epoch % n_checkpoint == 0 or epoch == num_epochs - 1:
-                    optimizer.consolidate_state_dict()
+                    if hasattr(optimizer, "consolidate_state_dict"):
+                        optimizer.consolidate_state_dict()
                     # if optimizer_complex is not None:
                     #     optimizer_complex.consolidate_state_dict()
 

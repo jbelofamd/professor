@@ -60,7 +60,7 @@ You can grab the latest file from the repo, or quickly make a new file with this
     ```
 
 
-You should now have 10,000 .h5 files, .png files, and a filelist.txt in that directory! Each .h5 file contains an image array that is `1 x 512 x 512`.
+You should now have 10,000 .h5 files, .png files, and a filelist.txt in that directory! The .png files are only for viewing; pass `--no-png` to skip them, which makes generation much faster. Each .h5 file contains an image array that is `1 x 512 x 512`.
 
 ## Notes about compression
 
