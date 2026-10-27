@@ -19,6 +19,8 @@ configure_python:
     - if: $CI_MERGE_REQUEST_TITLE =~ /^Draft/
       when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Hubcast mirrors GitHub PRs to GitLab as plain branch pushes
+    - if: $CI_PIPELINE_SOURCE == "push"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 build:
@@ -37,6 +39,8 @@ build:
     - if: $CI_MERGE_REQUEST_TITLE =~ /^Draft/
       when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Hubcast mirrors GitHub PRs to GitLab as plain branch pushes
+    - if: $CI_PIPELINE_SOURCE == "push"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 test:
@@ -53,6 +57,8 @@ test:
     - if: $CI_MERGE_REQUEST_TITLE =~ /^Draft/
       when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Hubcast mirrors GitHub PRs to GitLab as plain branch pushes
+    - if: $CI_PIPELINE_SOURCE == "push"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 include:
