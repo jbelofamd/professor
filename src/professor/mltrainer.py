@@ -182,8 +182,6 @@ class CompleteDatasetOneFileSims(Dataset[Any]):
 def sensitivity_rms(dataset: Dataset[Any], indices: NDArray[np.int_], comm: Any) -> NDArray[np.float64]:
     """Rms over pixels and channels of each input's sensitivities (item [2]) of a dataset, from the
     samples at indices on each rank, summed over all ranks. Non-finite samples are skipped."""
-    from mpi4py import MPI  # imported in main(), after the GPU runtime; DataLoader workers never call this
-
     sums = np.zeros(0)
     for i in indices:
         sens = dataset[int(i)][2].double()
@@ -193,7 +191,7 @@ def sensitivity_rms(dataset: Dataset[Any], indices: NDArray[np.int_], comm: Any)
             k = sens.shape[0]
             sums[:k] += torch.sum(torch.square(sens.flatten(1)), 1).numpy()
             sums[k:] += sens[0].numel()
-    sums = comm.allreduce(sums, op=MPI.SUM)
+    sums = comm.allreduce(sums)  # the default op is SUM; no mpi4py import, so the unit tests run without MPI
     k = sums.size // 2
     return np.sqrt(sums[:k] / np.maximum(sums[k:], 1))
 
