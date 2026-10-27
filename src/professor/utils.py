@@ -197,11 +197,12 @@ def field_loss(
     return loss
 
 
-def forward_jvp(
+def forward_jacobian_vector_product(
     model: torch.nn.Module, x: torch.Tensor, tangent: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Model output and its directional derivative along tangent, from one forward-mode pass.
+    Model output and its Jacobian-vector product (JVP) with tangent, i.e. the directional
+    derivative of the output along tangent, from one forward-mode automatic differentiation pass.
 
     Args:
         model (torch.nn.Module): The model
@@ -212,32 +213,35 @@ def forward_jvp(
         Tuple[torch.Tensor, torch.Tensor]: model(x) and d model(x + s * tangent) / ds at s = 0
     """
     with fwAD.dual_level():
-        out = model(fwAD.make_dual(x, tangent))
-        pred, d_pred = fwAD.unpack_dual(out)
-    if d_pred is None:  # output independent of the input
-        d_pred = torch.zeros_like(pred)
-    return pred, d_pred
+        dual_output = model(fwAD.make_dual(x, tangent))
+        output, output_derivative = fwAD.unpack_dual(dual_output)
+    if output_derivative is None:  # output independent of the input
+        output_derivative = torch.zeros_like(output)
+    return output, output_derivative
 
 
-def sobolev_loss(d_pred: torch.Tensor, sens: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+def sobolev_loss(output_derivative: torch.Tensor, sensitivities: torch.Tensor, direction: torch.Tensor) -> torch.Tensor:
     """
     Mean squared error of the model's directional derivative against the reference sensitivities.
 
-    With tangent u along the first k inputs, the reference directional derivative is
-    sum_i u_i sens_i. Samples whose sensitivities are not all finite are left out. The error is
-    divided by k, so with u_i ~ N(0, 1 / rms_i^2) the loss estimates the mean over inputs of the
-    derivative mse / rms_i^2 at the cost of one jvp.
+    With the tangent u = direction along the first k inputs, the reference directional derivative
+    is sum_i u_i sensitivities_i. Samples whose sensitivities are not all finite are left out. The
+    error is divided by k, so with u_i ~ N(0, 1 / rms_i^2) the loss estimates the mean over inputs
+    of the derivative mse / rms_i^2 at the cost of one Jacobian-vector product.
 
     Args:
-        d_pred (torch.Tensor): Directional derivative of the model, shape (n, channels, y, x[, z])
-        sens (torch.Tensor): d fields / d inputs, shape (n, k, channels, y, x[, z])
-        u (torch.Tensor): Tangent along the first k inputs, shape (n, k)
+        output_derivative (torch.Tensor): Directional derivative of the model, shape (n, channels, y, x[, z])
+        sensitivities (torch.Tensor): d fields / d inputs, shape (n, k, channels, y, x[, z])
+        direction (torch.Tensor): Tangent u along the first k inputs, shape (n, k)
 
     Returns:
         torch.Tensor: The loss
     """
-    ok = torch.isfinite(sens).flatten(1).all(1)
-    sens = torch.where(ok.view(-1, *([1] * (sens.dim() - 1))), sens, torch.zeros_like(sens))
-    d = d_pred - torch.einsum("nk,nk...->n...", u.to(sens.dtype), sens)
-    e = torch.mean(torch.square(d.flatten(1)), 1)
-    return torch.sum(ok * e) / ok.sum().clamp(min=1) / sens.shape[1]
+    is_valid = torch.isfinite(sensitivities).flatten(1).all(1)
+    sensitivities = torch.where(
+        is_valid.view(-1, *([1] * (sensitivities.dim() - 1))), sensitivities, torch.zeros_like(sensitivities)
+    )
+    reference_derivative = torch.einsum("nk,nk...->n...", direction.to(sensitivities.dtype), sensitivities)
+    derivative_error = output_derivative - reference_derivative
+    mse_per_sample = torch.mean(torch.square(derivative_error.flatten(1)), 1)
+    return torch.sum(is_valid * mse_per_sample) / is_valid.sum().clamp(min=1) / sensitivities.shape[1]

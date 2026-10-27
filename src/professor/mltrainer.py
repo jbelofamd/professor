@@ -14,7 +14,13 @@ import torch
 import torch.nn as nn
 from torch.profiler import profile, record_function, ProfilerActivity
 import professor
-from professor.utils import consolidated_loss, field_loss, forward_jvp, last_checkpoint, sobolev_loss
+from professor.utils import (
+    consolidated_loss,
+    field_loss,
+    forward_jacobian_vector_product,
+    last_checkpoint,
+    sobolev_loss,
+)
 from professor.layers import AlphaLinear
 from professor.torch_models import build_generator
 from professor.vela.config import build_template_config, update_config_checkpoint
@@ -28,15 +34,15 @@ from typing import cast, Tuple, Any
 
 
 class CompleteDataset(Dataset[Any]):
-    """One sample per hdf5 file. With sens_key set, items also hold the field sensitivities
-    f[sens_key], shape (n_sens, *fields.shape): d fields / d inputs for the first n_sens inputs."""
+    """One sample per hdf5 file. With sensitivity_key set, items also hold the field sensitivities
+    f[sensitivity_key], shape (k, *fields.shape): d fields / d inputs for the first k inputs."""
 
     def __init__(
         self,
         filelist: NDArray[np.str_],
         n_channels: int,
         path: str,
-        sens_key: str = "",
+        sensitivity_key: str = "",
     ):
         self._length: int = len(filelist)
         self._path: str = path
@@ -47,7 +53,7 @@ class CompleteDataset(Dataset[Any]):
         self.n_channels: int = n_channels
         self.filelist: NDArray[np.str_] = filelist
         self.n_input: int = 0
-        self.sens_key: str = sens_key
+        self.sensitivity_key: str = sensitivity_key
         self.__getsizes__(0)
 
     def __len__(self) -> int:
@@ -60,11 +66,11 @@ class CompleteDataset(Dataset[Any]):
                 # calling nan_to_num does seem to impact performance
                 inputs = cast(h5py.Group, f["inputs"])[:]
                 data = cast(h5py.Group, f["fields"])[:]
-                sens = cast(h5py.Group, f[self.sens_key])[:] if self.sens_key else None
+                sensitivities = cast(h5py.Group, f[self.sensitivity_key])[:] if self.sensitivity_key else None
             inputs = torch.from_numpy(inputs)
             data = torch.from_numpy(data)
-            if sens is not None:
-                return inputs.view(-1, 1, 1), data, torch.from_numpy(sens)
+            if sensitivities is not None:
+                return inputs.view(-1, 1, 1), data, torch.from_numpy(sensitivities)
             return inputs.view(-1, 1, 1), data
         except Exception as e:
             error = f"Exception {e} while processing {myfile}"
@@ -89,7 +95,7 @@ class CompleteDatasetDivideScaling(CompleteDataset):
         n_channels: int,
         path: str,
         scaling: torch.Tensor,
-        sens_key: str = "",
+        sensitivity_key: str = "",
     ) -> None:
         self._length: int = len(filelist)
         self._path: str = path
@@ -100,7 +106,7 @@ class CompleteDatasetDivideScaling(CompleteDataset):
         self.filelist: NDArray[np.str_] = filelist
         self.n_input: int = 0
         self.scaling: torch.Tensor = scaling
-        self.sens_key: str = sens_key
+        self.sensitivity_key: str = sensitivity_key
         self.__getsizes__(0)
 
     def __getitem__(self, i: int) -> Tuple[torch.Tensor, ...]:
@@ -110,14 +116,14 @@ class CompleteDatasetDivideScaling(CompleteDataset):
                 # calling nan_to_num does seem to impact performance
                 inputs = cast(h5py.Group, f["inputs"])[:]
                 data = cast(h5py.Group, f["fields"])[:]
-                sens = cast(h5py.Group, f[self.sens_key])[:] if self.sens_key else None
+                sensitivities = cast(h5py.Group, f[self.sensitivity_key])[:] if self.sensitivity_key else None
             inputs = torch.from_numpy(inputs)
             data = torch.from_numpy(data)
-            if sens is not None:
-                sens = torch.from_numpy(sens)
-                scale = self.scaling.flatten()[: sens.shape[0]].to(sens.dtype)
-                sens = sens * scale.view(-1, *([1] * (sens.dim() - 1)))
-                return inputs.view(-1, 1, 1) / self.scaling, data, sens
+            if sensitivities is not None:
+                sensitivities = torch.from_numpy(sensitivities)
+                scale = self.scaling.flatten()[: sensitivities.shape[0]].to(sensitivities.dtype)
+                sensitivities = sensitivities * scale.view(-1, *([1] * (sensitivities.dim() - 1)))
+                return inputs.view(-1, 1, 1) / self.scaling, data, sensitivities
             return inputs.view(-1, 1, 1) / self.scaling, data
         except Exception as e:
             error = f"Exception {e} while processing {myfile}"
@@ -125,15 +131,15 @@ class CompleteDatasetDivideScaling(CompleteDataset):
 
 
 class CompleteDatasetOneFileSims(Dataset[Any]):
-    """Many samples per hdf5 file, indexed by the filelist. With sens_key set, items also hold
-    f[sens_key][idx], shape (n_sens, *fields.shape): d fields / d inputs for the first n_sens inputs."""
+    """Many samples per hdf5 file, indexed by the filelist. With sensitivity_key set, items also hold
+    f[sensitivity_key][idx], shape (k, *fields.shape): d fields / d inputs for the first k inputs."""
 
     def __init__(
         self,
         filelist: NDArray[np.str_],
         n_channels: int,
         path: str,
-        sens_key: str = "",
+        sensitivity_key: str = "",
     ):
         self._length: int = len(filelist)
         self._path: str = path
@@ -143,7 +149,7 @@ class CompleteDatasetOneFileSims(Dataset[Any]):
         self.n_channels: int = n_channels
         self.filelist: NDArray[np.str_] = filelist
         self.n_input: int = 0
-        self.sens_key: str = sens_key
+        self.sensitivity_key: str = sensitivity_key
         self.__getsizes__(0)
 
     def __len__(self) -> int:
@@ -160,11 +166,11 @@ class CompleteDatasetOneFileSims(Dataset[Any]):
                 # data = np.nan_to_num(f['fields'][idx])
                 inputs = cast(h5py.Group, f["inputs"])[idx]
                 data = cast(h5py.Group, f["fields"])[idx]
-                sens = cast(h5py.Group, f[self.sens_key])[idx] if self.sens_key else None
+                sensitivities = cast(h5py.Group, f[self.sensitivity_key])[idx] if self.sensitivity_key else None
             inputs = torch.from_numpy(inputs)
             data = torch.from_numpy(data)
-            if sens is not None:
-                return inputs.view(-1, 1, 1), data, torch.from_numpy(sens)
+            if sensitivities is not None:
+                return inputs.view(-1, 1, 1), data, torch.from_numpy(sensitivities)
             return inputs.view(-1, 1, 1), data
         except Exception as e:
             error = f"Exception {e} while processing {myfile}"
@@ -184,13 +190,13 @@ def sensitivity_rms(dataset: Dataset[Any], indices: NDArray[np.int_], comm: Any)
     samples at indices on each rank, summed over all ranks. Non-finite samples are skipped."""
     sums = np.zeros(0)
     for i in indices:
-        sens = dataset[int(i)][2].double()
+        sensitivities = dataset[int(i)][2].double()
         if sums.size == 0:
-            sums = np.zeros(2 * sens.shape[0])
-        if torch.isfinite(sens).all():
-            k = sens.shape[0]
-            sums[:k] += torch.sum(torch.square(sens.flatten(1)), 1).numpy()
-            sums[k:] += sens[0].numel()
+            sums = np.zeros(2 * sensitivities.shape[0])
+        if torch.isfinite(sensitivities).all():
+            k = sensitivities.shape[0]
+            sums[:k] += torch.sum(torch.square(sensitivities.flatten(1)), 1).numpy()
+            sums[k:] += sensitivities[0].numel()
     sums = comm.allreduce(sums)  # the default op is SUM; no mpi4py import, so the unit tests run without MPI
     k = sums.size // 2
     return np.sqrt(sums[:k] / np.maximum(sums[k:], 1))
@@ -397,24 +403,24 @@ def main(args: argparse.Namespace) -> None:
 
     # the derivative (Sobolev) loss term needs the training samples' sensitivities
     sobolev_weight = getattr(args, "sobolev_weight", 0.0)
-    sobolev = sobolev_weight > 0
-    if sobolev and (args.dataset_type == 3 or args.compile):
+    use_sobolev = sobolev_weight > 0
+    if use_sobolev and (args.dataset_type == 3 or args.compile):
         raise ValueError("--sobolev_weight > 0 needs dataset type 0, 1 or 2 and no --compile")
-    sens_key = getattr(args, "sobolev_key", "jacobian") if sobolev else ""
+    sensitivity_key = getattr(args, "sobolev_key", "jacobian") if use_sobolev else ""
 
     if args.dataset_type == 0:
         TrainDataset = CompleteDataset(
             filelist_train,
             n_channels=n_channels,
             path=path,
-            sens_key=sens_key,
+            sensitivity_key=sensitivity_key,
         )
     elif args.dataset_type == 1:
         TrainDataset = CompleteDatasetOneFileSims(
             filelist_train,
             n_channels=n_channels,
             path=path,
-            sens_key=sens_key,
+            sensitivity_key=sensitivity_key,
         )
     elif args.dataset_type == 2:
         TrainDataset = CompleteDatasetDivideScaling(
@@ -422,7 +428,7 @@ def main(args: argparse.Namespace) -> None:
             n_channels=n_channels,
             path=path,
             scaling=scaling,
-            sens_key=sens_key,
+            sensitivity_key=sensitivity_key,
         )
         print(f"[rank{rank}]: using this scaling: {scaling[:, 0, 0]}")
     elif args.dataset_type == 3:
@@ -471,21 +477,31 @@ def main(args: argparse.Namespace) -> None:
 
     n_train = TrainDataset.__len__()
 
-    if sobolev:
-        _, sample_fields, sample_sens = TrainDataset[0]
-        n_sens = sample_sens.shape[0]
-        if sample_sens.shape[1:] != sample_fields.shape or n_sens > n_input:
+    if use_sobolev:
+        _, sample_fields, sample_sensitivities = TrainDataset[0]
+        n_sensitivity_inputs = sample_sensitivities.shape[0]
+        if sample_sensitivities.shape[1:] != sample_fields.shape or n_sensitivity_inputs > n_input:
             raise ValueError(
-                f"'{sens_key}' has shape {tuple(sample_sens.shape)} per sample; expected"
+                f"'{sensitivity_key}' has shape {tuple(sample_sensitivities.shape)} per sample; expected"
                 f" (k, {', '.join(str(n) for n in sample_fields.shape)}) with k <= {n_input} inputs"
             )
         # tangents u_i ~ N(0, 1 / rms_i^2) weight every input's derivative error alike
-        sens_rms = sensitivity_rms(TrainDataset, np.linspace(0, n_train - 1, 64 * size).astype(int)[rank::size], COMM)
-        sens_scale = torch.tensor(
-            np.divide(1.0, sens_rms, out=np.zeros_like(sens_rms), where=sens_rms > 0), dtype=torch.float32
+        rms_samples = np.linspace(0, n_train - 1, 64 * size).astype(int)[rank::size]
+        sensitivity_rms_per_input = sensitivity_rms(TrainDataset, rms_samples, COMM)
+        direction_scale = torch.tensor(
+            np.divide(
+                1.0,
+                sensitivity_rms_per_input,
+                out=np.zeros_like(sensitivity_rms_per_input),
+                where=sensitivity_rms_per_input > 0,
+            ),
+            dtype=torch.float32,
         ).to(device)
         if rank == 0:
-            print(f"sobolev: {sobolev_weight} * derivative mse, '{sens_key}' rms per input {sens_rms}")
+            print(
+                f"sobolev: {sobolev_weight} * derivative mse,"
+                f" '{sensitivity_key}' rms per input {sensitivity_rms_per_input}"
+            )
 
     n_pixels = max(n_pixels_y, n_pixels_x)
     n_dims = 2
@@ -654,22 +670,22 @@ def main(args: argparse.Namespace) -> None:
         return field_loss(output, target, loss_target, grad_weight, pyr_weight, pyr_levels)
 
     def ForwardLoss(
-        data: torch.Tensor, target: torch.Tensor, sens: torch.Tensor | None = None
+        data: torch.Tensor, target: torch.Tensor, sensitivities: torch.Tensor | None = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """model output, total loss and the Sobolev term (0 if off) for one training batch;
-        the datasets return the derivatives sens only when the Sobolev term is on"""
-        if sens is None:
+        the datasets return the sensitivities only when the Sobolev term is on"""
+        if sensitivities is None:
             output = model(data)
             return output, MyLoss(output, target), torch.zeros((), device=device)
-        sens = sens.to(device)
-        u = torch.randn(data.shape[0], n_sens, device=device) * sens_scale
+        sensitivities = sensitivities.to(device)
+        direction = torch.randn(data.shape[0], n_sensitivity_inputs, device=device) * direction_scale
         tangent = torch.zeros_like(data)
-        tangent[:, :n_sens, 0, 0] = u
+        tangent[:, :n_sensitivity_inputs, 0, 0] = direction
         # forward-mode AD skips autocast (fp32 dual input against bf16 weights), so this step runs in fp32
         with torch.autocast("cuda", enabled=False):
-            output, d_output = forward_jvp(model, data, tangent)
-        loss_d = sobolev_loss(d_output, sens, u)
-        return output, MyLoss(output, target) + sobolev_weight * loss_d, loss_d.detach()
+            output, output_derivative = forward_jacobian_vector_product(model, data, tangent)
+        loss_sobolev = sobolev_loss(output_derivative, sensitivities, direction)
+        return output, MyLoss(output, target) + sobolev_weight * loss_sobolev, loss_sobolev.detach()
 
     if rank == 0:
         print(
@@ -706,13 +722,13 @@ def main(args: argparse.Namespace) -> None:
                 train_mse_gpu = torch.zeros((), device=device)
                 train_l8_gpu = torch.zeros((), device=device)
                 training_losses_gpu = torch.zeros(n_models, device=device)
-                train_sob_gpu = torch.zeros((), device=device)
+                train_sobolev_gpu = torch.zeros((), device=device)
             with record_function("epoch_iteration"):
                 optimizer.zero_grad(set_to_none=True)
                 # if optimizer_complex is not None:
                 #     optimizer_complex.zero_grad(set_to_none=True)
 
-                for batch_idx, (data, target, *sens) in enumerate(train_loader):
+                for batch_idx, (data, target, *sensitivities) in enumerate(train_loader):
                     with record_function("optimizer_step"):
                         should_update_weights = (batch_idx + 1) % batch_multiplier == 0
                         if batch_idx + 1 == n_train_loader:
@@ -734,9 +750,9 @@ def main(args: argparse.Namespace) -> None:
 
                         with sync_context:
                             with torch.autocast("cuda", dtype=_amp_dtype, enabled=_amp_dtype is not None):
-                                output, loss, loss_d = ForwardLoss(data, target, *sens)
-                            if sobolev:
-                                train_sob_gpu += loss_d
+                                output, loss, loss_sobolev = ForwardLoss(data, target, *sensitivities)
+                            if use_sobolev:
+                                train_sobolev_gpu += loss_sobolev
                             scaled_loss = loss / accumulation_group_size
                             scaled_loss.backward()
 
@@ -770,8 +786,8 @@ def main(args: argparse.Namespace) -> None:
                 train_mse = train_mse_gpu.item()
                 train_l8 = train_l8_gpu.item()
                 training_losses = training_losses_gpu.cpu()
-                if sobolev:
-                    train_sob = COMM.allreduce(train_sob_gpu.item(), op=MPI.SUM) / (size * n_train_loader)
+                if use_sobolev:
+                    train_sobolev = COMM.allreduce(train_sobolev_gpu.item(), op=MPI.SUM) / (size * n_train_loader)
 
                 with record_function("communicate_losses_to_rank0"):
                     training_sums = np.array(
@@ -805,8 +821,8 @@ def main(args: argparse.Namespace) -> None:
                         }
                         for model_idx in range(n_models):
                             history[f"TrainMAE/{keys[model_idx]}"] = training_sums[7 + model_idx] / n_train_data  # noqa E:501
-                        if sobolev:
-                            history["Sobolev/train"] = train_sob
+                        if use_sobolev:
+                            history["Sobolev/train"] = train_sobolev
                         train_log = "{:04} {:04f} {:04f} {:04f} {:04f} {:04f} {:04f} {:04f} {:04f} {:04f}".format(  # noqa E:501
                             epoch,
                             history["MAE/train"],
@@ -820,8 +836,8 @@ def main(args: argparse.Namespace) -> None:
                             history["Epoch-Time"],
                         )
                         print(train_log)
-                        if sobolev:
-                            print(f"{epoch:04} sobolev {train_sob:04f}")
+                        if use_sobolev:
+                            print(f"{epoch:04} sobolev {train_sobolev:04f}")
 
                         if writer is not None:
                             for key in history:
